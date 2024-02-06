@@ -47,7 +47,9 @@ raw_pcb *pcb;
 TaskHandle_t loraSendMessageTaskHandler = NULL;
 TaskHandle_t loraReceiveMessageTaskHandler = NULL;
 int messageCount = 0;
-
+int packetRssi=0;
+int receivedPacketSize=0;
+int sentPacketSize=0;
 
 
 void handle_http_root() {
@@ -76,11 +78,6 @@ void setup() {
   display.setTextColor(WHITE);
   display.setTextSize(1);
   display.setCursor(0, 0);
-#ifdef GATEWAY
-  display.print("LoraGateway");
-#else
-  display.print("LoraNode");
-#endif
   display.display();
 
 
@@ -123,19 +120,14 @@ void loraReceiveMessageTask(void *arg) {
   }
   // print RSSI of packet
   Serial.printf("\nRSSI = %d\n", LoRa.packetRssi());
-/*
-  display.clearDisplay();
-  display.setTextColor(WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.printf("RSSI=%d\n", LoRa.packetRssi());
-  display.display();
-  */
+  packetRssi = LoRa.packetRssi();
+  vTaskDelete(loraReceiveMessageTaskHandler); 
 }
 
 
 void onLoraReceive(int packetSize) {
   Serial.printf("Received packet(%d)\n", packetSize);
+  receivedPacketSize = packetSize;
   xTaskCreate(loraReceiveMessageTask, "loraReceiveMessageTask", 4096, NULL, 1, &loraReceiveMessageTaskHandler);
 }
 
@@ -164,13 +156,14 @@ void loraSendMessageTask(void *arg) {
     LoRa.write(loraMessage, length);
     LoRa.endPacket();
 
-
     struct pbuf *trash = p;
     p = p->next;
 
     pbuf_free(trash);
     free(loraMessage);
+    sentPacketSize = length;
   }
+  vTaskDelete(loraSendMessageTaskHandler);
 }
 
 
@@ -184,4 +177,22 @@ unsigned char onICMPMessageReceived(void *arg, struct raw_pcb *pcb, struct pbuf 
 
 void loop() {
   server.handleClient();
+
+  
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  #ifdef GATEWAY
+    display.print("LoraGateway\n");
+  #else
+    display.print("LoraNode\n");
+  #endif
+  display.printf("%s\n", local_ip.toString().c_str());
+  display.printf("Send=%d\n", receivedPacketSize, sentPacketSize);
+  display.printf("Recv=%d\n", receivedPacketSize, receivedPacketSize);
+  display.printf("RSSI=%d\n", packetRssi);
+
+  display.display();
+  
 }
