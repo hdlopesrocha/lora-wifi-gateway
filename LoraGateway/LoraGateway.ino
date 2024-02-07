@@ -9,7 +9,7 @@
 #include <lwip/raw.h>
 #include <esp_wifi.h>
 
-#define GATEWAY 1
+//#define GATEWAY 1
 //define the pins used by the LoRa transceiver module
 #define SCK 5
 #define MISO 19
@@ -43,14 +43,19 @@ IPAddress gateway(192, 168, 20, 1);
 IPAddress subnet(255, 255, 255, 0);
 
 WebServer server(80);
-raw_pcb *pcb;
-TaskHandle_t loraSendMessageTaskHandler = NULL;
-TaskHandle_t loraReceiveMessageTaskHandler = NULL;
-int messageCount = 0;
-int packetRssi=0;
-int receivedPacketSize=0;
-int sentPacketSize=0;
+raw_pcb *pcbIcmpRecv;
+raw_pcb *pcbIcmpSend;
 
+TaskHandle_t loraReceiveMessageTaskHandler = NULL;
+SemaphoreHandle_t loraReceiveMessageMutex = xSemaphoreCreateMutex();
+
+TaskHandle_t loraSendMessageTaskHandler = NULL;
+SemaphoreHandle_t loraSendMessageMutex = xSemaphoreCreateMutex();
+
+int messageCount = 0;
+int packetRssi = 0;
+int receivedPacketSize = 0;
+int sentPacketSize = 0;
 
 void handle_http_root() {
   Serial.println("GET /");
@@ -90,11 +95,11 @@ void setup() {
 
 
 
-  pcb = raw_new(IP_PROTO_ICMP);
-  if (raw_bind(pcb, IP4_ADDR_ANY) != ERR_OK) {
+  pcbIcmpRecv = raw_new(IP_PROTO_ICMP);
+  if (raw_bind(pcbIcmpRecv, IP4_ADDR_ANY) != ERR_OK) {
     Serial.println("ERR: raw_bind");
   }
-  raw_recv(pcb, onICMPMessageReceived, NULL);
+  raw_recv(pcbIcmpRecv, onICMPMessageReceived, NULL);
 
   SPI.begin(SCK, MISO, MOSI, SS);
   LoRa.setPins(SS, RST, DIO0);
@@ -113,64 +118,95 @@ void setup() {
 }
 
 void loraReceiveMessageTask(void *arg) {
+  TaskHandle_t thisHandler = loraReceiveMessageTaskHandler;
+  if (xSemaphoreTake(loraReceiveMessageMutex, portMAX_DELAY) == pdTRUE) {
+    int length = (int)arg;
+    int index = 0;
+    uint8_t *payload = (uint8_t *)malloc(length);
 
-  // read packet
-  while (LoRa.available()) {
-    Serial.printf("%d|", LoRa.read());
+    // read packet
+    Serial.printf("lora(%d) = [", length);
+    while (LoRa.available()) {
+      int data = LoRa.read();
+      payload[index++] = (uint8_t)data;
+      Serial.printf("%02x", data);
+    }
+    Serial.printf("]\n");
+
+    // print RSSI of packet
+    Serial.printf("\nRSSI = %d\n", LoRa.packetRssi());
+    packetRssi = LoRa.packetRssi();
+    /*
+  pcbIcmpSend = raw_new(IP_PROTO_ICMP);
+  if (raw_bind(pcbIcmpSend, IP4_ADDR_ANY) != ERR_OK) {
+    Serial.println("ERR: raw_bind");
   }
-  // print RSSI of packet
-  Serial.printf("\nRSSI = %d\n", LoRa.packetRssi());
-  packetRssi = LoRa.packetRssi();
-  vTaskDelete(loraReceiveMessageTaskHandler); 
+
+
+  raw_send(pcbIcmpSend, buffer);
+  raw_remove(pcbIcmpSend);
+*/
+    free(payload);
+    xSemaphoreGive(loraReceiveMessageMutex);
+  } else {
+    Serial.printf("ERR: mutex did not lock\n");
+  }
+  vTaskDelete(thisHandler);
 }
 
 
 void onLoraReceive(int packetSize) {
-  Serial.printf("Received packet(%d)\n", packetSize);
   receivedPacketSize = packetSize;
-  xTaskCreate(loraReceiveMessageTask, "loraReceiveMessageTask", 4096, NULL, 1, &loraReceiveMessageTaskHandler);
+  xTaskCreate(loraReceiveMessageTask, "loraReceiveMessageTask", 4096, (void *)packetSize, 1, &loraReceiveMessageTaskHandler);
 }
 
 void loraSendMessageTask(void *arg) {
-  struct pbuf *p = (pbuf *)arg;
+  TaskHandle_t thisHandler = loraSendMessageTaskHandler;
+  pbuf *root = (pbuf *)arg;
 
-  while (p != NULL) {
-    Serial.printf("l=%d/%d\n", p->len, p->tot_len);
-    int protocol = IPH_PROTO((struct ip_hdr *)p->payload);
-    int version = IP_HDR_GET_VERSION(p->payload);
+  if (xSemaphoreTake(loraSendMessageMutex, portMAX_DELAY) == pdTRUE) {
 
-    Serial.printf("%d %d\n", protocol, version);
-    size_t length = p->len;
-    uint8_t *loraMessage = (uint8_t *)malloc(length);
-    memset(loraMessage, 0, length);
-    memcpy(loraMessage, p->payload, length);
+    for (pbuf *p = root; p != NULL; p = p->next) {
+      //Serial.printf("l=%d/%d\n", p->len, p->tot_len);
+      int protocol = IPH_PROTO((struct ip_hdr *)p->payload);
+      int version = IP_HDR_GET_VERSION(p->payload);
 
-    Serial.printf("message = ");
-    for (int i = 0; i < length; ++i) {
-      Serial.printf("|%hhu", loraMessage[i]);
+      //Serial.printf("%d %d\n", protocol, version);
+      int length = p->len;
+      uint8_t *loraMessage = (uint8_t *)p->payload;
+
+      Serial.printf("icmp(%d) = [", length);
+      for (int i = 0; i < length / sizeof(uint8_t); ++i) {
+        Serial.printf("%02x", loraMessage[i]);
+      }
+      Serial.printf("]\n");
+
+      // send packet
+      LoRa.beginPacket();
+      LoRa.write(loraMessage, length);
+      LoRa.endPacket();
+
+      sentPacketSize = length;
     }
-    Serial.printf("|\n");
-
-    // send packet
-    LoRa.beginPacket();
-    LoRa.write(loraMessage, length);
-    LoRa.endPacket();
-
-    struct pbuf *trash = p;
-    p = p->next;
-
-    pbuf_free(trash);
-    free(loraMessage);
-    sentPacketSize = length;
+    pbuf_free(root);
+    xSemaphoreGive(loraSendMessageMutex);
+  } else {
+    Serial.printf("ERR: mutex did not lock\n");
   }
-  vTaskDelete(loraSendMessageTaskHandler);
+
+  vTaskDelete(thisHandler);
 }
 
 
+
 unsigned char onICMPMessageReceived(void *arg, struct raw_pcb *pcb, struct pbuf *p, const ip_addr_t *addr) {
+  //void * ptrs = {p,&loraSendMessageTaskHandler};
   xTaskCreate(loraSendMessageTask, "loraSendMessageTask", 4096, p, 1, &loraSendMessageTaskHandler);
 
-
+  //loraSendMessageTask(p);
+  // 1 if the packet was 'eaten' (aka. deleted),
+  // 0 if the packet lives on
+  // If returning 1, the callback is responsible for freeing the pbuf if it's not used any more.
   return 1;
 }
 
@@ -178,21 +214,20 @@ unsigned char onICMPMessageReceived(void *arg, struct raw_pcb *pcb, struct pbuf 
 void loop() {
   server.handleClient();
 
-  
+
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.setTextSize(1);
   display.setCursor(0, 0);
-  #ifdef GATEWAY
-    display.print("LoraGateway\n");
-  #else
-    display.print("LoraNode\n");
-  #endif
+#ifdef GATEWAY
+  display.print("LoraGateway\n");
+#else
+  display.print("LoraNode\n");
+#endif
   display.printf("%s\n", local_ip.toString().c_str());
-  display.printf("Send=%d\n", receivedPacketSize, sentPacketSize);
-  display.printf("Recv=%d\n", receivedPacketSize, receivedPacketSize);
+  display.printf("Send=%d\n", sentPacketSize);
+  display.printf("Recv=%d\n", receivedPacketSize);
   display.printf("RSSI=%d\n", packetRssi);
 
   display.display();
-  
 }
