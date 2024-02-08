@@ -7,9 +7,12 @@
 #include <WiFiClient.h>
 #include <WebServer.h>
 #include <lwip/raw.h>
+#include <lwip/netif.h>
 #include <esp_wifi.h>
+#include <netif/ppp/pppol2tp.h>
 
-//#define GATEWAY 1
+#define GATEWAY 1
+
 //define the pins used by the LoRa transceiver module
 #define SCK 5
 #define MISO 19
@@ -40,7 +43,12 @@ IPAddress local_ip(192, 168, 20, 1);
 IPAddress gateway(192, 168, 20, 1);
 #endif
 
+IPAddress localhost(127, 0, 0, 1);
+IPAddress any_ip(0, 0, 0, 0);
 IPAddress subnet(255, 255, 255, 0);
+
+
+
 
 WebServer server(80);
 raw_pcb *pcbIcmpRecv;
@@ -63,9 +71,31 @@ void handle_http_root() {
   server.send(200, "text/html", data);
 }
 
+void startVPN() {
+  ip4_addr_t addr;
+  /* Set our address */
+  IP4_ADDR(&addr, 192,168,0,1);
+  ppp_set_ipcp_ouraddr(ppp, &addr);
+  /* Set peer(his) address */
+  IP4_ADDR(&addr, 192,168,0,2);
+  ppp_set_ipcp_hisaddr(ppp, &addr);
+  /* Set primary DNS server */
+  IP4_ADDR(&addr, 192,168,10,20);
+  ppp_set_ipcp_dnsaddr(ppp, 0, &addr);
+  /* Set secondary DNS server */
+  IP4_ADDR(&addr, 192,168,10,21);
+  ppp_set_ipcp_dnsaddr(ppp, 1, &addr);
+  /* Auth configuration, this is pretty self-explanatory */
+  ppp_set_auth(ppp, PPPAUTHTYPE_ANY, "login", "password");
+  /* Require peer to authenticate */
+  ppp_set_auth_required(ppp, 1);
+}
+
 void setup() {
 
   Serial.begin(115200);
+
+  // === DIPLAY INIT ===
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(OLED_RST, OUTPUT);
   digitalWrite(OLED_RST, LOW);
@@ -90,15 +120,21 @@ void setup() {
   WiFi.softAPConfig(local_ip, gateway, subnet);
   WiFi.softAP(ssid, passphrase);
 
+  ip4_addr_t any; 
+  any.addr = IPADDR_ANY;
+  ip4_addr_t loopback;
+  loopback.addr = IPADDR_LOOPBACK;
+
+
+ // ip4_output_if_src(&any, &loopback);
+
   Serial.print("IP address = ");
   Serial.println(WiFi.softAPIP());
-
+  netif * interface = netif_get_by_index(2);
 
 
   pcbIcmpRecv = raw_new(IP_PROTO_ICMP);
-  if (raw_bind(pcbIcmpRecv, IP4_ADDR_ANY) != ERR_OK) {
-    Serial.println("ERR: raw_bind");
-  }
+  raw_bind_netif(pcbIcmpRecv, NULL);
   raw_recv(pcbIcmpRecv, onICMPMessageReceived, NULL);
 
   SPI.begin(SCK, MISO, MOSI, SS);
@@ -115,6 +151,9 @@ void setup() {
 
   server.on("/", handle_http_root);
   server.begin();
+
+  startVPN();
+
 }
 
 void loraReceiveMessageTask(void *arg) {
@@ -138,12 +177,15 @@ void loraReceiveMessageTask(void *arg) {
     packetRssi = LoRa.packetRssi();
     /*
   pcbIcmpSend = raw_new(IP_PROTO_ICMP);
-  if (raw_bind(pcbIcmpSend, IP4_ADDR_ANY) != ERR_OK) {
-    Serial.println("ERR: raw_bind");
-  }
+  raw_bind_netif(pcbIcmpSend, NULL);
+  pbuf buffer;
+  buffer.payload = (void*) payload;
+  buffer.len = length;
+  buffer.tot_len = length;
+  buffer.next = NULL;
 
 
-  raw_send(pcbIcmpSend, buffer);
+  raw_send(pcbIcmpSend, &buffer);
   raw_remove(pcbIcmpSend);
 */
     free(payload);
