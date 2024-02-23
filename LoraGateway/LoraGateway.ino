@@ -1,3 +1,22 @@
+#define LWIP_IPV4 1
+#define CONFIG_LWIP_AUTOIP 1
+#define CONFIG_LWIP_IP_FORWARD 1
+#define CONFIG_LWIP_IP_DEBUG 1
+#define CONFIG_LWIP_IPV4_NAPT 1
+#define CONFIG_LWIP_DHCP_DOES_ARP_CHECK 0
+#define CONFIG_LWIP_NETIF_DEBUG 1
+#define CONFIG_LWIP_NETIF_API 1
+#define CONFIG_LWIP_NETIF_LOOPBACK 1
+#define CONFIG_LWIP_PBUF_DEBUG 1
+#define CONFIG_LWIP_API_LIB_DEBUG 1
+#define CONFIG_LWIP_SOCKETS_DEBUG 1
+#define CONFIG_LWIP_TCP_DEBUG 1
+#define TCP_INPUT_DEBUG 1
+#define TCP_OUTPUT_DEBUG 1
+#define LWIP_HOOK_FILENAME "xxx.h"
+
+//#include "LoraPPP.h"
+
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -6,10 +25,11 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
+
 #include <lwip/raw.h>
 #include <lwip/netif.h>
+#include <lwip/autoip.h>
 #include <esp_wifi.h>
-#include <netif/ppp/pppol2tp.h>
 
 #define GATEWAY 1
 
@@ -47,9 +67,6 @@ IPAddress localhost(127, 0, 0, 1);
 IPAddress any_ip(0, 0, 0, 0);
 IPAddress subnet(255, 255, 255, 0);
 
-
-
-
 WebServer server(80);
 raw_pcb *pcbIcmpRecv;
 raw_pcb *pcbIcmpSend;
@@ -64,37 +81,75 @@ int messageCount = 0;
 int packetRssi = 0;
 int receivedPacketSize = 0;
 int sentPacketSize = 0;
+#define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
+#define BYTE_TO_BINARY(byte)  \
+  ((byte) & 0x80 ? '1' : '0'), \
+  ((byte) & 0x40 ? '1' : '0'), \
+  ((byte) & 0x20 ? '1' : '0'), \
+  ((byte) & 0x10 ? '1' : '0'), \
+  ((byte) & 0x08 ? '1' : '0'), \
+  ((byte) & 0x04 ? '1' : '0'), \
+  ((byte) & 0x02 ? '1' : '0'), \
+  ((byte) & 0x01 ? '1' : '0') 
 
+  
 void handle_http_root() {
   Serial.println("GET /");
   char *data = "<h1>Hello</h1>\0";
   server.send(200, "text/html", data);
 }
 
-void startVPN() {
-  ip4_addr_t addr;
-  /* Set our address */
-  IP4_ADDR(&addr, 192,168,0,1);
-  ppp_set_ipcp_ouraddr(ppp, &addr);
-  /* Set peer(his) address */
-  IP4_ADDR(&addr, 192,168,0,2);
-  ppp_set_ipcp_hisaddr(ppp, &addr);
-  /* Set primary DNS server */
-  IP4_ADDR(&addr, 192,168,10,20);
-  ppp_set_ipcp_dnsaddr(ppp, 0, &addr);
-  /* Set secondary DNS server */
-  IP4_ADDR(&addr, 192,168,10,21);
-  ppp_set_ipcp_dnsaddr(ppp, 1, &addr);
-  /* Auth configuration, this is pretty self-explanatory */
-  ppp_set_auth(ppp, PPPAUTHTYPE_ANY, "login", "password");
-  /* Require peer to authenticate */
-  ppp_set_auth_required(ppp, 1);
+
+char base46_map[] = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+                     'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
+                     'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+                     'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'};
+
+void promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
+  unsigned long t = micros();
+
+  const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buf;
+  unsigned int timestamp = ppkt->rx_ctrl.timestamp;
+
+  String type_str;
+  switch(type){
+    case WIFI_PKT_MGMT: type_str = "WIFI_PKT_MGMT"; break;
+    case WIFI_PKT_CTRL: type_str = "WIFI_PKT_CTRL"; break;
+    case WIFI_PKT_DATA: type_str = "WIFI_PKT_DATA"; break;
+    case WIFI_PKT_MISC: type_str = "WIFI_PKT_MISC"; break;
+  }
+
+  if(type == WIFI_PKT_DATA) {
+    const uint8_t * data = ppkt->payload;
+    u16_t * data16 = (u16_t*) data;
+ 
+    unsigned int length = ppkt->rx_ctrl.sig_len;
+
+   unsigned int ipVersion = data16[0] & 0xf000 >> 12;
+   unsigned int ipIHL = data16[0] & 0x0f00 >> 8;
+
+
+
+    Serial.printf("wifi(v=%x,ihl=%x,len=%u) = [", ipVersion, ipIHL, length);
+    for (int i = 0; i < length/2; ++i) {
+      //Serial.printf(BYTE_TO_BINARY_PATTERN,BYTE_TO_BINARY(data[i]) );
+      //Serial.printf(".");
+      Serial.printf("%02x.", ntohs(data16[i]));
+    }
+    Serial.printf("]\n");
+    LoRa.beginPacket();
+    LoRa.write(data, length);
+    LoRa.endPacket();
+    sentPacketSize = length;
+  }
+  //Serial.printf("rx_cb is called: %s\t rt:%u cbt: %lu, tdiff: %lu\n", type_str, timestamp, t, (t - timestamp));
 }
 
 void setup() {
 
   Serial.begin(115200);
-
+  Serial.printf("LWIP_IPV4=%d\n",LWIP_IPV4);
+  Serial.printf("LWIP_AUTOIP=%d\n",LWIP_AUTOIP);
   // === DIPLAY INIT ===
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(OLED_RST, OUTPUT);
@@ -132,6 +187,7 @@ void setup() {
   Serial.println(WiFi.softAPIP());
   netif * interface = netif_get_by_index(2);
 
+//autoip_accept_packet(interface, &any);
 
   pcbIcmpRecv = raw_new(IP_PROTO_ICMP);
   raw_bind_netif(pcbIcmpRecv, NULL);
@@ -152,8 +208,9 @@ void setup() {
   server.on("/", handle_http_root);
   server.begin();
 
-  startVPN();
-
+  //startVPN();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&promiscuous_rx_cb);
 }
 
 void loraReceiveMessageTask(void *arg) {
