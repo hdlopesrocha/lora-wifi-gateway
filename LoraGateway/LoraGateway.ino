@@ -31,7 +31,7 @@
 #include <lwip/autoip.h>
 #include <esp_wifi.h>
 
-#define GATEWAY 1
+//#define GATEWAY 1
 
 //define the pins used by the LoRa transceiver module
 #define SCK 5
@@ -105,43 +105,55 @@ char base46_map[] = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
                      'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
                      'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'};
 
-void promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
+void packetHandler(void *buf, wifi_promiscuous_pkt_type_t type) {
   unsigned long t = micros();
 
-  const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buf;
-  unsigned int timestamp = ppkt->rx_ctrl.timestamp;
+  const wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buf;
+  unsigned int timestamp = packet->rx_ctrl.timestamp;
+  unsigned int length = packet->rx_ctrl.sig_len;
 
-  String type_str;
-  switch(type){
-    case WIFI_PKT_MGMT: type_str = "WIFI_PKT_MGMT"; break;
-    case WIFI_PKT_CTRL: type_str = "WIFI_PKT_CTRL"; break;
-    case WIFI_PKT_DATA: type_str = "WIFI_PKT_DATA"; break;
-    case WIFI_PKT_MISC: type_str = "WIFI_PKT_MISC"; break;
-  }
+    const uint8_t* ethernetPacket = packet->payload; // Size 14 bytes
+    const uint8_t* ipPacket = ethernetPacket + 14; //  Size 20 bytes
+    const uint8_t* icmpPacket = ipPacket + 20; // Size 8 bytes
+    uint16_t sequenceNumber =  (ethernetPacket[1] << 8) | ethernetPacket[0];
 
-  if(type == WIFI_PKT_DATA) {
-    const uint8_t * data = ppkt->payload;
-    u16_t * data16 = (u16_t*) data;
- 
-    unsigned int length = ppkt->rx_ctrl.sig_len;
-
-   unsigned int ipVersion = data16[0] & 0xf000 >> 12;
-   unsigned int ipIHL = data16[0] & 0x0f00 >> 8;
-
-
-
-    Serial.printf("wifi(v=%x,ihl=%x,len=%u) = [", ipVersion, ipIHL, length);
-    for (int i = 0; i < length/2; ++i) {
-      //Serial.printf(BYTE_TO_BINARY_PATTERN,BYTE_TO_BINARY(data[i]) );
-      //Serial.printf(".");
-      Serial.printf("%02x.", ntohs(data16[i]));
+    // Extract ethernet headers
+    uint16_t etherType = (ethernetPacket[16] << 8) | ethernetPacket[17];
+    Serial.printf("ether(seq=%02x,dstMAC=%02x:%02x:%02x:%02x:%02x:%02x,srcMAC=%02x:%02x:%02x:%02x:%02x:%02x)=[",
+              sequenceNumber,
+              ethernetPacket[4],ethernetPacket[5],ethernetPacket[6],ethernetPacket[7],ethernetPacket[8],ethernetPacket[9],
+              ethernetPacket[10],ethernetPacket[11],ethernetPacket[12],ethernetPacket[13],ethernetPacket[14],ethernetPacket[15]
+    );
+    for (int i = 0; i < 14; ++i) {
+      Serial.printf("%02x.", ethernetPacket[i]);
     }
     Serial.printf("]\n");
+
+    // Extract IP headers
+    uint8_t ipVersion = ipPacket[0];
+    uint8_t ipProtocol = ipPacket[9];
+
+    Serial.printf("ip(version=%02x,proto=%02x) = [",ipVersion, ipProtocol);
+    for (int i = 0; i < 20; ++i) {
+      Serial.printf("%02x.", ipPacket[i]);
+    }
+    Serial.printf("]\n");
+
+    if (ipProtocol == 1) { // ICMP protocol value is 1
+      // Assuming ICMP header is 8 bytes
+      uint8_t icmpType = icmpPacket[0];
+      uint8_t icmpCode = icmpPacket[1];
+      uint16_t icmpChecksum = (icmpPacket[2] << 8) | icmpPacket[3];
+      uint16_t icmpIdentifier = (icmpPacket[4] << 8) | icmpPacket[5];
+      uint16_t icmpSequenceNumber = (icmpPacket[6] << 8) | icmpPacket[7];   
+      Serial.printf("icmp(type=%02x,code=%02x,checksum=%04x,id=%04x,seq=%04x)\n", icmpType, icmpCode,icmpChecksum,icmpIdentifier,icmpSequenceNumber);
+    }
+
     LoRa.beginPacket();
-    LoRa.write(data, length);
+    LoRa.write(ethernetPacket, length);
     LoRa.endPacket();
     sentPacketSize = length;
-  }
+  
   //Serial.printf("rx_cb is called: %s\t rt:%u cbt: %lu, tdiff: %lu\n", type_str, timestamp, t, (t - timestamp));
 }
 
@@ -181,17 +193,17 @@ void setup() {
   loopback.addr = IPADDR_LOOPBACK;
 
 
- // ip4_output_if_src(&any, &loopback);
+  // ip4_output_if_src(&any, &loopback);
 
   Serial.print("IP address = ");
   Serial.println(WiFi.softAPIP());
-  netif * interface = netif_get_by_index(2);
+  
+  //netif * interface = netif_get_by_index(2);
+  //autoip_accept_packet(interface, &any);
 
-//autoip_accept_packet(interface, &any);
-
-  pcbIcmpRecv = raw_new(IP_PROTO_ICMP);
-  raw_bind_netif(pcbIcmpRecv, NULL);
-  raw_recv(pcbIcmpRecv, onICMPMessageReceived, NULL);
+  //pcbIcmpRecv = raw_new(IP_PROTO_ICMP);
+  //raw_bind_netif(pcbIcmpRecv, NULL);
+  //raw_recv(pcbIcmpRecv, onICMPMessageReceived, NULL);
 
   SPI.begin(SCK, MISO, MOSI, SS);
   LoRa.setPins(SS, RST, DIO0);
@@ -210,7 +222,7 @@ void setup() {
 
   //startVPN();
   esp_wifi_set_promiscuous(true);
-  esp_wifi_set_promiscuous_rx_cb(&promiscuous_rx_cb);
+  esp_wifi_set_promiscuous_rx_cb(&packetHandler);
 }
 
 void loraReceiveMessageTask(void *arg) {
